@@ -99,8 +99,6 @@ function versioninfo(io::IO=stdout)
     println(io, "Toolchain:")
     println(io, "- Julia: $VERSION")
     println(io, "- LLVM: $(LLVM.version())")
-    println(io, "- PTX ISA support: $(join(map(ver->"$(ver.major).$(ver.minor)", supported_toolchain().ptx), ", "))")
-    println(io, "- Device capability support: $(join(map(ver->"sm_$(ver.major)$(ver.minor)", supported_toolchain().cap), ", "))")
     println(io)
 
     env = filter(var->startswith(var, "JULIA_CUDA"), keys(ENV))
@@ -108,6 +106,23 @@ function versioninfo(io::IO=stdout)
         println(io, "Environment:")
         for var in env
             println(io, "- $var: $(ENV[var])")
+        end
+        println(io)
+    end
+
+    prefs = [
+        "nonblocking_synchronization" => Preferences.load_preference(CUDA, "nonblocking_synchronization"),
+        "default_memory" => Preferences.load_preference(CUDA, "default_memory"),
+        "CUDA_Runtime_jll.version" => Preferences.load_preference(CUDA_Runtime_jll, "version"),
+        "CUDA_Runtime_jll.local" => Preferences.load_preference(CUDA_Runtime_jll, "local"),
+        "CUDA_Driver_jll.compat" => Preferences.load_preference(CUDA_Driver_jll, "compat"),
+    ]
+    if any(x->!isnothing(x[2]), prefs)
+        println(io, "Preferences:")
+        for (key, val) in prefs
+            if !isnothing(val)
+                println(io, "- $key: $val")
+            end
         end
         println(io)
     end
@@ -138,7 +153,7 @@ function versioninfo(io::IO=stdout)
             cap = capability(dev)
             mem = device!(dev) do
                 # this requires a device context, so we prefer NVML
-                (free=available_memory(), total=total_memory())
+                (free=free_memory(), total=total_memory())
             end
             (; str, cap, mem)
         end
@@ -159,23 +174,4 @@ function versioninfo(io::IO=stdout)
         end
         println(io, "  $(i-1): $str (sm_$(cap.major)$(cap.minor), $(Base.format_bytes(mem.free)) / $(Base.format_bytes(mem.total)) available)")
     end
-end
-
-# this helper function encodes options for compute-sanitizer useful with Julia applications
-function compute_sanitizer_cmd(tool::String="memcheck")
-    sanitizer = CUDA.compute_sanitizer()
-    `$sanitizer --tool $tool --launch-timeout=0 --target-processes=all --report-api-errors=no`
-end
-
-"""
-    run_compute_sanitizer([julia_args=``]; [tool="memcheck", sanitizer_args=``])
-
-Run a new Julia session under the CUDA compute-sanitizer tool `tool`. This is useful to
-detect various GPU-related issues, like memory errors or race conditions.
-"""
-function run_compute_sanitizer(julia_args=``; tool::String="memcheck", sanitizer_args=``)
-    cmd = `$(Base.julia_cmd()) --project=$(Base.active_project())`
-
-    println("Re-starting your active Julia session...")
-    run(`$(CUDA.compute_sanitizer_cmd(tool)) $sanitizer_args $cmd $julia_args`)
 end

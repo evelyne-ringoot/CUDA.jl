@@ -2,8 +2,9 @@ module cuTensorNet
 
 using LinearAlgebra
 using CUDA
-using CUDA: CUstream, cudaDataType, @checked, HandleCache, with_workspace
-using CUDA: retry_reclaim, initialize_context, isdebug
+using CUDA.APIUtils
+using CUDA: CUstream, cudaDataType
+using CUDA: retry_reclaim, initialize_context, isdebug, cuDoubleComplex
 
 using cuTENSOR
 using cuTENSOR: CuTensor
@@ -14,6 +15,13 @@ if CUDA.local_toolkit
     using CUDA_Runtime_Discovery
 else
     import cuQuantum_jll
+end
+
+# XXX: cuTensorNet depends on cuTENSOR 1, while GC-safe ccalls were introduced in CUDA 5.3
+#      which is only compatible with cuTENSOR 2. So disable that functionality for now.
+const var"@gcsafe_ccall" = var"@ccall"
+macro gcunsafe_callback(expr)
+    esc(expr)
 end
 
 
@@ -28,12 +36,26 @@ const cudaDataType_t = cudaDataType
 # core library
 include("libcutensornet.jl")
 
+# low-level wrappers
 include("error.jl")
 include("types.jl")
+include("wrappers.jl")
 include("tensornet.jl")
 
-# cache for created, but unused handles
-const idle_handles = HandleCache{CuContext,cutensornetHandle_t}()
+
+## handles
+
+function handle_ctor(ctx)
+    context!(ctx) do
+        cutensornetCreate()
+    end
+end
+function handle_dtor(ctx, handle)
+    context!(ctx; skip_destroyed=true) do
+        cutensornetDestroy(handle)
+    end
+end
+const idle_handles = HandleCache{CuContext,cutensornetHandle_t}(handle_ctor, handle_dtor)
 
 function handle()
     cuda = CUDA.active_state()
@@ -46,18 +68,9 @@ function handle()
 
     # get library state
     @noinline function new_state(cuda)
-        new_handle = pop!(idle_handles, cuda.context) do
-            handle = Ref{cutensornetHandle_t}()
-            cutensornetCreate(handle)
-            handle[]
-        end
-
+        new_handle = pop!(idle_handles, cuda.context)
         finalizer(current_task()) do task
-            push!(idle_handles, cuda.context, new_handle) do
-                context!(cuda.context; skip_destroyed=true) do
-                    cutensornetDestroy(new_handle)
-                end
-            end
+            push!(idle_handles, cuda.context, new_handle)
         end
 
         (; handle=new_handle)
@@ -69,26 +82,10 @@ function handle()
     return state.handle
 end
 
-function version()
-  ver = cutensornetGetVersion()
-  major, ver = divrem(ver, 10000)
-  minor, patch = divrem(ver, 100)
-
-  VersionNumber(major, minor, patch)
-end
-
-function cuda_version()
-  ver = cutensornetGetCudartVersion()
-  major, ver = divrem(ver, 1000)
-  minor, patch = divrem(ver, 10)
-
-  VersionNumber(major, minor, patch)
-end
-
 
 ## logging
 
-function log_message(log_level, function_name, message)
+@gcunsafe_callback function log_message(log_level, function_name, message)
     function_name = unsafe_string(function_name)
     message = unsafe_string(message)
     output = if isempty(message)
@@ -113,8 +110,8 @@ function __init__()
     # find the library
     global libcutensornet
     if CUDA.local_toolkit
-        dirs = CUDA_Runtime.find_toolkit()
-        path = CUDA_Runtime.get_library(dirs, "cutensornet"; optional=true)
+        dirs = CUDA_Runtime_Discovery.find_toolkit()
+        path = CUDA_Runtime_Discovery.get_library(dirs, "cutensornet"; optional=true)
         if path === nothing
             precompiling || @error "cuQuantum is not available on your system (looked for cutensornet in $(join(dirs, ", ")))"
             return

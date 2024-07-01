@@ -1,7 +1,8 @@
 module cuStateVec
 
 using CUDA
-using CUDA: CUstream, cudaDataType, @checked, HandleCache, with_workspace, libraryPropertyType
+using CUDA.APIUtils
+using CUDA: CUstream, cudaDataType, cudaEvent_t, libraryPropertyType
 using CUDA: unsafe_free!, retry_reclaim, initialize_context, isdebug
 
 using CEnum: @cenum
@@ -10,6 +11,13 @@ if CUDA.local_toolkit
     using CUDA_Runtime_Discovery
 else
     import cuQuantum_jll
+end
+
+# XXX: cuStateVec depends on cuTENSOR 1, while GC-safe ccalls were introduced in CUDA 5.3
+#      which is only compatible with cuTENSOR 2. So disable that functionality for now.
+const var"@gcsafe_ccall" = var"@ccall"
+macro gcunsafe_callback(expr)
+    esc(expr)
 end
 
 
@@ -24,41 +32,59 @@ const cudaDataType_t = cudaDataType
 # core library
 include("libcustatevec.jl")
 
+# low-level wrappers
 include("error.jl")
 include("types.jl")
+include("wrappers.jl")
 include("statevec.jl")
 
-# cache for created, but unused handles
-const idle_handles  = HandleCache{CuContext,custatevecHandle_t}()
+
+## handles
+
+function handle_ctor(ctx)
+    context!(ctx) do
+        custatevecCreate()
+    end
+end
+function handle_dtor(ctx, handle)
+    context!(ctx; skip_destroyed=true) do
+        custatevecDestroy(handle)
+    end
+end
+const idle_handles = HandleCache{CuContext,custatevecHandle_t}(handle_ctor, handle_dtor)
+
+# fat handle, includes a cache
+struct cuStateVecHandle
+    handle::custatevecHandle_t
+    cache::CuVector{UInt8}
+end
+Base.unsafe_convert(::Type{Ptr{custatevecContext}}, handle::cuStateVecHandle) =
+    handle.handle
 
 function handle()
     cuda = CUDA.active_state()
 
     # every task maintains library state per device
-    LibraryState = @NamedTuple{handle::custatevecHandle_t, stream::CuStream}
+    LibraryState = @NamedTuple{handle::cuStateVecHandle, stream::CuStream}
     states = get!(task_local_storage(), :CUQUANTUM) do
         Dict{CuContext,LibraryState}()
     end::Dict{CuContext,LibraryState}
 
     # get library state
     @noinline function new_state(cuda)
-        new_handle = pop!(idle_handles, cuda.context) do
-            handle = Ref{custatevecHandle_t}()
-            custatevecCreate(handle)
-            handle[]
-        end
+        new_handle = pop!(idle_handles, cuda.context)
+
+        cache = CuVector{UInt8}(undef, 0)
+        fat_handle = cuStateVecHandle(new_handle, cache)
 
         finalizer(current_task()) do task
-            push!(idle_handles, cuda.context, new_handle) do
-                context!(cuda.context; skip_destroyed=true) do
-                    custatevecDestroy(new_handle)
-                end
-            end
+            CUDA.unsafe_free!(cache)
+            push!(idle_handles, cuda.context, new_handle)
         end
 
         custatevecSetStream(new_handle, cuda.stream)
 
-        (; handle=new_handle, cuda.stream)
+        (; handle=fat_handle, stream=cuda.stream)
     end
     state = get!(states, cuda.context) do
         new_state(cuda)
@@ -76,18 +102,10 @@ function handle()
     return state.handle
 end
 
-function version()
-  ver = custatevecGetVersion()
-  major, ver = divrem(ver, 1000)
-  minor, patch = divrem(ver, 100)
-
-  VersionNumber(major, minor, patch)
-end
-
 
 ## logging
 
-function log_message(log_level, function_name, message)
+@gcunsafe_callback function log_message(log_level, function_name, message)
     function_name = unsafe_string(function_name)
     message = unsafe_string(message)
     output = if isempty(message)
@@ -112,8 +130,8 @@ function __init__()
     # find the library
     global libcustatevec
     if CUDA.local_toolkit
-        dirs = CUDA_Runtime.find_toolkit()
-        path = CUDA_Runtime.get_library(dirs, "custatevec"; optional=true)
+        dirs = CUDA_Runtime_Discovery.find_toolkit()
+        path = CUDA_Runtime_Discovery.get_library(dirs, "custatevec"; optional=true)
         if path === nothing
             precompiling || @error "cuQuantum is not available on your system (looked for custatevec in $(join(dirs, ", ")))"
             return
@@ -128,7 +146,7 @@ function __init__()
     end
 
     # register a log callback
-    if isdebug(:init, cuStateVec) || Base.JLOptions().debug_level >= 2
+    if !precompiling && (isdebug(:init, cuStateVec) || Base.JLOptions().debug_level >= 2)
         callback = @cfunction(log_message, Nothing, (Int32, Cstring, Cstring))
         custatevecLoggerSetCallback(callback)
         custatevecLoggerOpenFile(Sys.iswindows() ? "NUL" : "/dev/null")

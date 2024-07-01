@@ -1,15 +1,13 @@
 
 using LinearAlgebra
 using LinearAlgebra: BlasInt, checksquare
-using LinearAlgebra.LAPACK: chkargsok, chklapackerror, chktrans, chkside, chkdiag
+using LinearAlgebra.LAPACK: chkargsok, chklapackerror, chktrans, chkside, chkdiag, chkuplo
 
 using ..CUBLAS: unsafe_batch
 
 function cusolverDnCreate()
   handle_ref = Ref{cusolverDnHandle_t}()
-  check(CUSOLVER_STATUS_NOT_INITIALIZED, CUSOLVER_STATUS_INTERNAL_ERROR) do
-    unsafe_cusolverDnCreate(handle_ref)
-  end
+  cusolverDnCreate(handle_ref)
   return handle_ref[]
 end
 
@@ -22,18 +20,18 @@ for (bname, fname,elty) in ((:cusolverDnSpotrf_bufferSize, :cusolverDnSpotrf, :F
     @eval begin
         function potrf!(uplo::Char,
                         A::StridedCuMatrix{$elty})
-            LinearAlgebra.BLAS.chkuplo(uplo)
+            chkuplo(uplo)
             n = checksquare(A)
             lda = max(1, stride(A, 2))
 
             function bufferSize()
                 out = Ref{Cint}(0)
                 $bname(dense_handle(), uplo, n, A, lda, out)
-                out[]
+                out[] * sizeof($elty)
             end
 
             devinfo = CuArray{Cint}(undef, 1)
-            with_workspace($elty, bufferSize) do buffer
+            with_workspace(bufferSize) do buffer
                 $fname(dense_handle(), uplo, n, A, lda, buffer, length(buffer), devinfo)
             end
 
@@ -55,7 +53,7 @@ for (fname,elty) in ((:cusolverDnSpotrs, :Float32),
         function potrs!(uplo::Char,
                         A::StridedCuMatrix{$elty},
                         B::StridedCuVecOrMat{$elty})
-            LinearAlgebra.BLAS.chkuplo(uplo)
+            chkuplo(uplo)
             n = checksquare(A)
             if size(B, 1) != n
                 throw(DimensionMismatch("first dimension of B, $(size(B,1)), must match second dimension of A, $n"))
@@ -83,18 +81,18 @@ for (bname, fname,elty) in ((:cusolverDnSpotri_bufferSize, :cusolverDnSpotri, :F
     @eval begin
         function potri!(uplo::Char,
                         A::StridedCuMatrix{$elty})
-            LinearAlgebra.BLAS.chkuplo(uplo)
+            chkuplo(uplo)
             n = checksquare(A)
             lda = max(1, stride(A, 2))
 
             function bufferSize()
                 out = Ref{Cint}(0)
                 $bname(dense_handle(), uplo, n, A, lda, out)
-                out[]
+                out[] * sizeof($elty)
             end
 
             devinfo = CuArray{Cint}(undef, 1)
-            with_workspace($elty, bufferSize) do buffer
+            with_workspace(bufferSize) do buffer
                 $fname(dense_handle(), uplo, n, A, lda, buffer, length(buffer), devinfo)
             end
 
@@ -113,19 +111,18 @@ for (bname, fname,elty) in ((:cusolverDnSgetrf_bufferSize, :cusolverDnSgetrf, :F
                             (:cusolverDnCgetrf_bufferSize, :cusolverDnCgetrf, :ComplexF32),
                             (:cusolverDnZgetrf_bufferSize, :cusolverDnZgetrf, :ComplexF64))
     @eval begin
-        function getrf!(A::StridedCuMatrix{$elty})
+        function getrf!(A::StridedCuMatrix{$elty}, ipiv::CuVector{Cint})
             m,n = size(A)
             lda = max(1, stride(A, 2))
 
             function bufferSize()
                 out = Ref{Cint}(0)
                 $bname(dense_handle(), m, n, A, lda, out)
-                return out[]
+                return out[] * sizeof($elty)
             end
 
-            ipiv = CuArray{Cint}(undef, min(m,n))
             devinfo = CuArray{Cint}(undef, 1)
-            with_workspace($elty, bufferSize) do buffer
+            with_workspace(bufferSize) do buffer
                 $fname(dense_handle(), m, n, A, lda, buffer, ipiv, devinfo)
             end
 
@@ -134,6 +131,12 @@ for (bname, fname,elty) in ((:cusolverDnSgetrf_bufferSize, :cusolverDnSgetrf, :F
             chkargsok(BlasInt(info))
 
             A, ipiv, info
+        end
+
+        function getrf!(A::StridedCuMatrix{$elty})
+            m,n = size(A)
+            ipiv = CuArray{Cint}(undef, min(m, n))
+            getrf!(A, ipiv)
         end
     end
 end
@@ -144,19 +147,18 @@ for (bname, fname,elty) in ((:cusolverDnSgeqrf_bufferSize, :cusolverDnSgeqrf, :F
                             (:cusolverDnCgeqrf_bufferSize, :cusolverDnCgeqrf, :ComplexF32),
                             (:cusolverDnZgeqrf_bufferSize, :cusolverDnZgeqrf, :ComplexF64))
     @eval begin
-        function geqrf!(A::StridedCuMatrix{$elty})
+        function geqrf!(A::StridedCuMatrix{$elty}, tau::CuVector{$elty})
             m, n = size(A)
             lda  = max(1, stride(A, 2))
 
             function bufferSize()
                 out = Ref{Cint}(0)
                 $bname(dense_handle(), m, n, A, lda, out)
-                return out[]
+                return out[] * sizeof($elty)
             end
 
-            tau  = CuArray{$elty}(undef, min(m, n))
             devinfo = CuArray{Cint}(undef, 1)
-            with_workspace($elty, bufferSize) do buffer
+            with_workspace(bufferSize) do buffer
                 $fname(dense_handle(), m, n, A, lda, tau, buffer, length(buffer), devinfo)
             end
 
@@ -165,6 +167,12 @@ for (bname, fname,elty) in ((:cusolverDnSgeqrf_bufferSize, :cusolverDnSgeqrf, :F
             chkargsok(BlasInt(info))
 
             A, tau
+        end
+
+        function geqrf!(A::StridedCuMatrix{$elty})
+            m, n = size(A)
+            tau  = CuArray{$elty}(undef, min(m, n))
+            geqrf!(A, tau)
         end
     end
 end
@@ -176,20 +184,20 @@ for (bname, fname,elty) in ((:cusolverDnSsytrf_bufferSize, :cusolverDnSsytrf, :F
                             (:cusolverDnZsytrf_bufferSize, :cusolverDnZsytrf, :ComplexF64))
     @eval begin
         function sytrf!(uplo::Char,
-                        A::StridedCuMatrix{$elty})
-            LinearAlgebra.BLAS.chkuplo(uplo)
+                        A::StridedCuMatrix{$elty},
+                        ipiv::CuVector{Cint})
+            chkuplo(uplo)
             n = checksquare(A)
             lda = max(1, stride(A, 2))
 
             function bufferSize()
                 out = Ref{Cint}(0)
                 $bname(dense_handle(), n, A, lda, out)
-                return out[]
+                return out[] * sizeof($elty)
             end
 
-            ipiv = CuArray{Cint}(undef, n)
             devinfo = CuArray{Cint}(undef, 1)
-            with_workspace($elty, bufferSize) do buffer
+            with_workspace(bufferSize) do buffer
                 $fname(dense_handle(), uplo, n, A, lda, ipiv, buffer, length(buffer), devinfo)
             end
 
@@ -198,6 +206,12 @@ for (bname, fname,elty) in ((:cusolverDnSsytrf_bufferSize, :cusolverDnSsytrf, :F
             chkargsok(BlasInt(info))
 
             A, ipiv, info
+        end
+
+        function sytrf!(uplo::Char, A::StridedCuMatrix{$elty})
+            n = checksquare(A)
+            ipiv = CuArray{Cint}(undef, n)
+            sytrf!(uplo, A, ipiv)
         end
     end
 end
@@ -254,10 +268,11 @@ for (bname, fname, elty) in ((:cusolverDnSormqr_bufferSize, :cusolverDnSormqr, :
 
             # Support transa = 'C' for real matrices
             trans = $elty <: Real && trans == 'C' ? 'T' : trans
+           ($elty <: Complex) && (trans == 'T') && throw(ArgumentError("trans = 'T' is not supported with complex matrices."))
 
             chkside(side)
             chktrans(trans)
-            m,n = ndims(C) == 2 ? size(C) : (size(C, 1), 1)
+            m,n = ndims(C) == 2 ? size(C) : (length(C), 1)
             mA  = size(A, 1)
             k   = length(tau)
             if side == 'L' && m != mA
@@ -278,11 +293,11 @@ for (bname, fname, elty) in ((:cusolverDnSormqr_bufferSize, :cusolverDnSormqr, :
             function bufferSize()
                 out = Ref{Cint}(0)
                 $bname(dense_handle(), side, trans, m, n, k, A, lda, tau, C, ldc, out)
-                return out[]
+                return out[] * sizeof($elty)
             end
 
             devinfo = CuArray{Cint}(undef, 1)
-            with_workspace($elty, bufferSize) do buffer
+            with_workspace(bufferSize) do buffer
                 $fname(dense_handle(), side, trans, m, n, k, A, lda, tau, C, ldc,
                     buffer, length(buffer), devinfo)
             end
@@ -311,11 +326,11 @@ for (bname, fname, elty) in ((:cusolverDnSorgqr_bufferSize, :cusolverDnSorgqr, :
             function bufferSize()
                 out = Ref{Cint}(0)
                 $bname(dense_handle(), m, n, k, A, lda, tau, out)
-                return out[]
+                return out[] * sizeof($elty)
             end
 
             devinfo = CuArray{Cint}(undef, 1)
-            with_workspace($elty, bufferSize) do buffer
+            with_workspace(bufferSize) do buffer
                 $fname(dense_handle(), m, n, k, A, lda, tau, buffer, length(buffer), devinfo)
             end
 
@@ -345,7 +360,7 @@ for (bname, fname, elty, relty) in ((:cusolverDnSgebrd_bufferSize, :cusolverDnSg
             function bufferSize()
                 out = Ref{Cint}(0)
                 $bname(dense_handle(), m, n, out)
-                return out[]
+                return out[] * sizeof($elty)
             end
 
             devinfo = CuArray{Cint}(undef, 1)
@@ -355,7 +370,7 @@ for (bname, fname, elty, relty) in ((:cusolverDnSgebrd_bufferSize, :cusolverDnSg
             TAUQ    = CuArray{$elty}(undef, k)
             TAUP    = CuArray{$elty}(undef, k)
 
-            with_workspace($elty, bufferSize) do buffer
+            with_workspace(bufferSize) do buffer
                 $fname(dense_handle(), m, n, A, lda, D, E, TAUQ, TAUP, buffer, length(buffer), devinfo)
             end
 
@@ -377,17 +392,12 @@ for (bname, fname, elty, relty) in ((:cusolverDnSgesvd_bufferSize, :cusolverDnSg
                         jobvt::Char,
                         A::StridedCuMatrix{$elty})
             m, n = size(A)
-            if m < n
-                throw(ArgumentError("CUSOLVER's gesvd currently requires m >= n"))
-                # XXX: is this documented?
-            end
-            lda     = max(1, stride(A, 2))
+            (m < n) && throw(ArgumentError("CUSOLVER's gesvd requires m ≥ n"))
+            lda = max(1, stride(A, 2))
 
             U = if jobu === 'A'
                 CuArray{$elty}(undef, m, m)
-            elseif jobu == 'S'
-                CuArray{$elty}(undef, m, min(m, n))
-            elseif jobu === 'O'
+            elseif jobu == 'S' || jobu === 'O'
                 CuArray{$elty}(undef, m, min(m, n))
             elseif jobu === 'N'
                 CU_NULL
@@ -400,9 +410,7 @@ for (bname, fname, elty, relty) in ((:cusolverDnSgesvd_bufferSize, :cusolverDnSg
 
             Vt = if jobvt === 'A'
                 CuArray{$elty}(undef, n, n)
-            elseif jobu === 'S'
-                CuArray{$elty}(undef, min(m, n), n)
-            elseif jobu === 'O'
+            elseif jobvt === 'S' || jobvt === 'O'
                 CuArray{$elty}(undef, min(m, n), n)
             elseif jobvt === 'N'
                 CU_NULL
@@ -414,12 +422,12 @@ for (bname, fname, elty, relty) in ((:cusolverDnSgesvd_bufferSize, :cusolverDnSg
             function bufferSize()
                 out = Ref{Cint}(0)
                 $bname(dense_handle(), m, n, out)
-                return out[]
+                return out[] * sizeof($elty)
             end
 
             rwork   = CuArray{$relty}(undef, min(m, n) - 1)
             devinfo = CuArray{Cint}(undef, 1)
-            with_workspace($elty, bufferSize) do work
+            with_workspace(bufferSize) do work
                 $fname(dense_handle(), jobu, jobvt, m, n, A, lda, S, U, ldu, Vt, ldvt,
                     work, length(work), rwork, devinfo)
             end
@@ -474,11 +482,11 @@ for (bname, fname, elty, relty) in ((:cusolverDnSgesvdj_bufferSize, :cusolverDnS
                 out = Ref{Cint}(0)
                 $bname(dense_handle(), jobz, econ, m, n, A, lda, S, U, ldu, V, ldv,
                        out, params[])
-                return out[]
+                return out[] * sizeof($elty)
             end
 
             devinfo = CuArray{Cint}(undef, 1)
-            with_workspace($elty, bufferSize) do work
+            with_workspace(bufferSize) do work
                 $fname(dense_handle(), jobz, econ, m, n, A, lda, S, U, ldu, V, ldv,
                        work, length(work), devinfo, params[])
             end
@@ -526,11 +534,11 @@ for (bname, fname, elty, relty) in ((:cusolverDnSgesvdjBatched_bufferSize, :cuso
                 out = Ref{Cint}(0)
                 $bname(dense_handle(), jobz, m, n, A, lda, S, U, ldu, V, ldv,
                        out, params[], batchSize)
-                return out[]
+                return out[] * sizeof($elty)
             end
 
             devinfo = CuArray{Cint}(undef, batchSize)
-            with_workspace($elty, bufferSize) do work
+            with_workspace(bufferSize) do work
                 $fname(dense_handle(), jobz, m, n, A, lda, S, U, ldu, V, ldv,
                        work, length(work), devinfo, params[], batchSize)
             end
@@ -579,19 +587,19 @@ for (bname, fname, elty, relty) in ((:cusolverDnSgesvdaStridedBatched_bufferSize
 
             function bufferSize()
                 out = Ref{Cint}(0)
-                $bname(dense_handle(), jobz, rank, m, n, A, lda, strideA, 
-                       S, strideS, U, ldu, strideU, V, ldv, strideV, 
+                $bname(dense_handle(), jobz, rank, m, n, A, lda, strideA,
+                       S, strideS, U, ldu, strideU, V, ldv, strideV,
                        out, batchSize)
-                return out[]
+                return out[] * sizeof($elty)
             end
 
             devinfo = CuArray{Cint}(undef, batchSize)
             # residual storage
             h_RnrmF = Array{Cdouble}(undef, batchSize)
 
-            with_workspace($elty, bufferSize) do work
-                $fname(dense_handle(), jobz, rank, m, n, A, lda, strideA, 
-                       S, strideS, U, ldu, strideU, V, ldv, strideV, 
+            with_workspace(bufferSize) do work
+                $fname(dense_handle(), jobz, rank, m, n, A, lda, strideA,
+                       S, strideS, U, ldu, strideU, V, ldv, strideV,
                        work, length(work), devinfo, h_RnrmF, batchSize)
             end
 
@@ -616,7 +624,7 @@ for (jname, bname, fname, elty, relty) in ((:syevd!, :cusolverDnSsyevd_bufferSiz
         function $jname(jobz::Char,
                         uplo::Char,
                         A::StridedCuMatrix{$elty})
-            LinearAlgebra.BLAS.chkuplo(uplo)
+            chkuplo(uplo)
             n       = checksquare(A)
             lda     = max(1, stride(A, 2))
             W       = CuArray{$relty}(undef, n)
@@ -624,11 +632,11 @@ for (jname, bname, fname, elty, relty) in ((:syevd!, :cusolverDnSsyevd_bufferSiz
             function bufferSize()
                 out = Ref{Cint}(0)
                 $bname(dense_handle(), jobz, uplo, n, A, lda, W, out)
-                return out[]
+                return out[] * sizeof($elty)
             end
 
             devinfo = CuArray{Cint}(undef, 1)
-            with_workspace($elty, bufferSize) do buffer
+            with_workspace(bufferSize) do buffer
                 $fname(dense_handle(), jobz, uplo, n, A, lda, W,
                        buffer, length(buffer), devinfo)
             end
@@ -656,7 +664,7 @@ for (jname, bname, fname, elty, relty) in ((:sygvd!, :cusolverDnSsygvd_bufferSiz
                         uplo::Char,
                         A::StridedCuMatrix{$elty},
                         B::StridedCuMatrix{$elty})
-            LinearAlgebra.BLAS.chkuplo(uplo)
+            chkuplo(uplo)
             nA, nB  = checksquare(A, B)
             if nB != nA
                 throw(DimensionMismatch("Dimensions of A ($nA, $nA) and B ($nB, $nB) must match!"))
@@ -669,11 +677,11 @@ for (jname, bname, fname, elty, relty) in ((:sygvd!, :cusolverDnSsygvd_bufferSiz
             function bufferSize()
                 out = Ref{Cint}(0)
                 $bname(dense_handle(), itype, jobz, uplo, n, A, lda, B, ldb, W, out)
-                return out[]
+                return out[] * sizeof($elty)
             end
 
             devinfo = CuArray{Cint}(undef, 1)
-            with_workspace($elty, bufferSize) do buffer
+            with_workspace(bufferSize) do buffer
                 $fname(dense_handle(), itype, jobz, uplo, n, A, lda, B, ldb, W,
                     buffer, length(buffer), devinfo)
             end
@@ -703,7 +711,7 @@ for (jname, bname, fname, elty, relty) in ((:sygvj!, :cusolverDnSsygvj_bufferSiz
                         B::StridedCuMatrix{$elty};
                         tol::$relty=eps($relty),
                         max_sweeps::Int=100)
-            LinearAlgebra.BLAS.chkuplo(uplo)
+            chkuplo(uplo)
             nA, nB  = checksquare(A, B)
             if nB != nA
                 throw(DimensionMismatch("Dimensions of A ($nA, $nA) and B ($nB, $nB) must match!"))
@@ -721,11 +729,11 @@ for (jname, bname, fname, elty, relty) in ((:sygvj!, :cusolverDnSsygvj_bufferSiz
                 out = Ref{Cint}(0)
                 $bname(dense_handle(), itype, jobz, uplo, n, A, lda, B, ldb, W,
                        out, params[])
-                return out[]
+                return out[] * sizeof($elty)
             end
 
             devinfo = CuArray{Cint}(undef, 1)
-            with_workspace($elty, bufferSize) do buffer
+            with_workspace(bufferSize) do buffer
                 $fname(dense_handle(), itype, jobz, uplo, n, A, lda, B, ldb, W,
                     buffer, length(buffer), devinfo, params[])
             end
@@ -757,7 +765,7 @@ for (jname, bname, fname, elty, relty) in ((:syevjBatched!, :cusolverDnSsyevjBat
                         max_sweeps::Int=100)
 
             # Set up information for the solver arguments
-            LinearAlgebra.BLAS.chkuplo(uplo)
+            chkuplo(uplo)
             n       = checksquare(A)
             lda     = max(1, stride(A, 2))
             batchSize = size(A,3)
@@ -774,11 +782,11 @@ for (jname, bname, fname, elty, relty) in ((:syevjBatched!, :cusolverDnSsyevjBat
             function bufferSize()
                 out = Ref{Cint}(0)
                 $bname(dense_handle(), jobz, uplo, n, A, lda, W, out, params[], batchSize)
-                return out[]
+                return out[] * sizeof($elty)
             end
 
             # Run the solver
-            with_workspace($elty, bufferSize) do work
+            with_workspace(bufferSize) do work
                 $fname(dense_handle(), jobz, uplo, n, A, lda, W, work,
                        length(work), devinfo, params[], batchSize)
             end
@@ -816,7 +824,7 @@ for (fname, elty) in ((:cusolverDnSpotrsBatched, :Float32),
                 throw(DimensionMismatch(""))
             end
             # Set up information for the solver arguments
-            LinearAlgebra.BLAS.chkuplo(uplo)
+            chkuplo(uplo)
             n = checksquare(A[1])
             if size(B[1], 1) != n
                 throw(DimensionMismatch("first dimension of B[i], $(size(B[1],1)), must match second dimension of A, $n"))
@@ -855,7 +863,7 @@ for (fname, elty) in ((:cusolverDnSpotrfBatched, :Float32),
         function potrfBatched!(uplo::Char, A::Vector{<:StridedCuMatrix{$elty}})
 
             # Set up information for the solver arguments
-            LinearAlgebra.BLAS.chkuplo(uplo)
+            chkuplo(uplo)
             n = checksquare(A[1])
             lda = max(1, stride(A[1], 2))
             batchSize = length(A)
@@ -890,8 +898,11 @@ for elty in (:Float32, :Float64, :ComplexF32, :ComplexF64)
         LinearAlgebra.LAPACK.potrs!(uplo::Char, A::StridedCuMatrix{$elty}, B::StridedCuVecOrMat{$elty}) = CUSOLVER.potrs!(uplo, A, B)
         LinearAlgebra.LAPACK.potri!(uplo::Char, A::StridedCuMatrix{$elty}) = CUSOLVER.potri!(uplo, A)
         LinearAlgebra.LAPACK.getrf!(A::StridedCuMatrix{$elty}) = CUSOLVER.getrf!(A)
+        LinearAlgebra.LAPACK.getrf!(A::StridedCuMatrix{$elty}, ipiv::CuVector{Cint}) = CUSOLVER.getrf!(A, ipiv)
         LinearAlgebra.LAPACK.geqrf!(A::StridedCuMatrix{$elty}) = CUSOLVER.geqrf!(A)
+        LinearAlgebra.LAPACK.geqrf!(A::StridedCuMatrix{$elty}, tau::CuVector{$elty}) = CUSOLVER.geqrf!(A, tau)
         LinearAlgebra.LAPACK.sytrf!(uplo::Char, A::StridedCuMatrix{$elty}) = sytrf!(uplo, A)
+        LinearAlgebra.LAPACK.sytrf!(uplo::Char, A::StridedCuMatrix{$elty}, ipiv::CuVector{Cint}) = CUSOLVER.sytrf!(uplo, A, ipiv)
         LinearAlgebra.LAPACK.getrs!(trans::Char, A::StridedCuMatrix{$elty}, ipiv::CuVector{Cint}, B::StridedCuVecOrMat{$elty}) = CUSOLVER.getrs!(trans, A, ipiv, B)
         LinearAlgebra.LAPACK.ormqr!(side::Char, trans::Char, A::CuMatrix{$elty}, tau::CuVector{$elty}, C::CuVecOrMat{$elty}) = CUSOLVER.ormqr!(side, trans, A, tau, C)
         LinearAlgebra.LAPACK.orgqr!(A::StridedCuMatrix{$elty}, tau::CuVector{$elty}) = CUSOLVER.orgqr!(A, tau)
@@ -902,12 +913,28 @@ end
 
 for elty in (:Float32, :Float64)
     @eval begin
+        LinearAlgebra.LAPACK.syev!(jobz::Char, uplo::Char, A::StridedCuMatrix{$elty}) = CUSOLVER.syevd!(jobz, uplo, A)
         LinearAlgebra.LAPACK.sygvd!(itype::Int, jobz::Char, uplo::Char, A::StridedCuMatrix{$elty}, B::StridedCuMatrix{$elty}) = CUSOLVER.sygvd!(itype, jobz, uplo, A, B)
     end
 end
 
 for elty in (:ComplexF32, :ComplexF64)
     @eval begin
+        LinearAlgebra.LAPACK.syev!(jobz::Char, uplo::Char, A::StridedCuMatrix{$elty}) = CUSOLVER.heevd!(jobz, uplo, A)
         LinearAlgebra.LAPACK.sygvd!(itype::Int, jobz::Char, uplo::Char, A::StridedCuMatrix{$elty}, B::StridedCuMatrix{$elty}) = CUSOLVER.hegvd!(itype, jobz, uplo, A, B)
+    end
+end
+
+if VERSION >= v"1.10"
+    for elty in (:Float32, :Float64)
+        @eval begin
+            LinearAlgebra.LAPACK.syevd!(jobz::Char, uplo::Char, A::StridedCuMatrix{$elty}) = CUSOLVER.syevd!(jobz, uplo, A)
+        end
+    end
+
+    for elty in (:ComplexF32, :ComplexF64)
+        @eval begin
+            LinearAlgebra.LAPACK.syevd!(jobz::Char, uplo::Char, A::StridedCuMatrix{$elty}) = CUSOLVER.heevd!(jobz, uplo, A)
+        end
     end
 end

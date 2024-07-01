@@ -86,7 +86,7 @@ the time spent on the CPU, and the time spent on the GPU:
 ```julia
 julia> a = CUDA.rand(1024,1024,1024);
 
-julia> CUDA.@profile sin.(a);
+julia> CUDA.@profile sin.(a)
 Profiler ran for 11.93 ms, capturing 8 events.
 
 Host-side activity: calling CUDA APIs took 437.26 µs (3.67% of the trace)
@@ -109,7 +109,7 @@ By default, `CUDA.@profile` will provide a summary of host and device activities
 prefer a chronological view of the events, you can set the `trace` keyword argument:
 
 ```julia
-julia> CUDA.@profile trace=true sin.(a);
+julia> CUDA.@profile trace=true sin.(a)
 Profiler ran for 11.71 ms, capturing 8 events.
 
 Host-side activity: calling CUDA APIs took 217.68 µs (1.86% of the trace)
@@ -136,22 +136,27 @@ corresponds to the device-side `broadcast` kernel.
 
 If you want more details, or a graphical representation, we recommend using external
 profilers. To inform those external tools which code needs to be profiled (e.g., to exclude
-warm-up iterations or other noninteresting elements) you can use `CUDA.@profile` with the
-`external=true` keyword argument to surround interesting code with:
+warm-up iterations or other noninteresting elements) you can also use `CUDA.@profile` to
+surround interesting code with:
 
 ```julia
 julia> a = CUDA.rand(1024,1024,1024);
 
 julia> sin.(a);  # warmup
 
-julia> CUDA.@profile external=true sin.(a);
+julia> CUDA.@profile sin.(a);
+[ Info: This Julia session is already being profiled; defaulting to the external profiler.
 
 julia>
 ```
 
-This only activates an external profiler, and does not perform any profiling itself. NVIDIA
-provides two tools for profiling CUDA applications: NSight Systems and NSight Compute for
-respectively timeline profiling and more detailed kernel analysis. Both tools are
+Note that the external profiler is automatically detected, and makes `CUDA.@profile` switch
+to a mode where it merely activates an external profiler and does not do perform any
+profiling itself. In case the detection does not work, this mode can be forcibly activated
+by passing `external=true` to `CUDA.@profile`.
+
+NVIDIA provides two tools for profiling CUDA applications: NSight Systems and NSight Compute
+for respectively timeline profiling and more detailed kernel analysis. Both tools are
 well-integrated with the Julia GPU packages, and make it possible to iteratively profile
 without having to restart Julia.
 
@@ -180,7 +185,7 @@ julia> a = CUDA.rand(1024,1024,1024);
 
 julia> sin.(a);
 
-julia> CUDA.@profile external=true sin.(a);
+julia> CUDA.@profile sin.(a);
 start executed
 Processing events...
 Capturing symbol files...
@@ -205,7 +210,7 @@ You can open the resulting `.qdrep` file with `nsight-sys`:
 !!! info
 
     If NSight Systems does not capture any kernel launch, even though you have used
-    `CUDA.@profile external=true`, try starting `nsys` with `--trace cuda`.
+    `CUDA.@profile`, try starting `nsys` with `--trace cuda`.
 
 #### NVIDIA Nsight Compute
 
@@ -214,7 +219,11 @@ interactions in detail, Nsight Compute is the tool for you. It is again possible
 profiler with an interactive session of Julia, and debug or profile only those sections of
 your application that are marked with `CUDA.@profile`.
 
-Start with launching Julia under the Nsight Compute CLI tool:
+First, ensure that all (CUDA) packages that are involved in your application have been
+precompiled. Otherwise, you'll end up profiling the precompilation process, instead of
+the process where the actual work happens.
+
+Then, launch Julia under the Nsight Compute CLI tool as follows:
 
 ```
 $ ncu --mode=launch julia
@@ -224,35 +233,43 @@ You will get an interactive REPL, where you can execute whatever code you want:
 
 ```julia
 julia> using CUDA
-
-julia> CUDA.driver_version()
-
 # Julia hangs!
 ```
 
 As soon as you use CUDA.jl, your Julia process will hang. This is expected, as the tool
 breaks upon the very first call to the CUDA API, at which point you are expected to launch
-the Nsight Compute GUI utility and attach to the running session:
+the Nsight Compute GUI utility, select `Interactive Profile` under `Activity`, and attach
+to the running session by selecting it in the list in the `Attach` pane:
 
 !["NVIDIA Nsight Compute - Attaching to a session"](nsight_compute-attach.png)
 
-You will see that the tool has stopped execution on the call to `cuInit`. Now check
-`Profile > Auto Profile` to make Nsight Compute gather statistics on our kernels, and clock
-`Debug > Resume` to resume your session.
+Note that this even works with remote systems, i.e., you can have NSight Compute connect
+over ssh to a remote system where you run Julia under `ncu`.
 
-Now our CLI session comes to life again, and we can enter the rest of our script:
+Once you've successfully attached to a Julia process, you will see that the tool has stopped
+execution on the call to `cuInit`. Now check `Profile > Auto Profile` to make Nsight Compute
+gather statistics on our kernels, uncheck `Debug > Break On API Error` to avoid halting the
+process when innocuous errors happen, and click `Debug > Resume` to resume your application.
+
+After doing so, our CLI session comes to life again, and we can execute the rest of our script:
 
 ```julia
 julia> a = CUDA.rand(1024,1024,1024);
 
 julia> sin.(a);
 
-julia> CUDA.@profile external=true sin.(a);
+julia> CUDA.@profile sin.(a);
 ```
 
 Once that's finished, the Nsight Compute GUI window will have plenty details on our kernel:
 
 !["NVIDIA Nsight Compute - Kernel profiling"](nsight_compute-kernel.png)
+
+By default, this only collects a basic set of metrics. If you need more information on a
+specific kernel, select `detailed` or `full` in the `Metric Selection` pane and re-run
+your kernels. Note that collecting more metrics is also more expensive, sometimes even
+requiring multiple executions of your kernel. As such, it is recommended to only collect
+basic metrics by default, and only detailed or full metrics for kernels of interest.
 
 At any point in time, you can also pause your application from the debug menu, and inspect
 the API calls that have been made:
@@ -289,7 +306,3 @@ CUDA.jl will by default emit the necessary source line information, which you ca
 launching Julia with `-g0`. Conversely, launching with `-g2` will emit additional debug
 information, which can be useful in combination with tools like `cuda-gdb`, but might hurt
 performance or code size.
-
-!!! warning
-
-    Due to bugs in LLVM and CUDA, debug info emission is unavailable in Julia 1.4 and higher.

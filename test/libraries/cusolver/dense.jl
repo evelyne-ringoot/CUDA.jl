@@ -26,6 +26,67 @@ n_range = (1:n) .+ (n_sub_start -1)
 l_range = (1:l) .+ (l_sub_start -1)
 
 @testset "elty = $elty" for elty in [Float32, Float64, ComplexF32, ComplexF64]
+    @testset "geqrf! -- orgqr!" begin
+        A = rand(elty, m, n)
+        dA = CuArray(A)
+        dA, τ = CUSOLVER.geqrf!(dA)
+        CUSOLVER.orgqr!(dA, τ)
+        @test dA' * dA ≈ I
+    end
+
+    @testset "ormqr!" begin
+        @testset "side = $side" for side in ['L', 'R']
+            @testset "trans = $trans" for (trans, op) in [('N', identity), ('T', transpose), ('C', adjoint)]
+                (elty <: Complex) && (trans == 'T') && continue
+                A = rand(elty, m, n)
+                dA = CuArray(A)
+                dA, dτ = CUSOLVER.geqrf!(dA)
+
+                hI = Matrix{elty}(I, m, m)
+                dI = CuArray(hI)
+                dH = CUSOLVER.ormqr!(side, 'N', dA, dτ, dI)
+                @test dH' * dH ≈ I
+
+                C = side == 'L' ? rand(elty, m, n) : rand(elty, n, m)
+                dC = CuArray(C)
+                dD = side == 'L' ? op(dH) * dC : dC * op(dH)
+
+                CUSOLVER.ormqr!(side, trans, dA, dτ, dC)
+                @test dC ≈ dD
+            end
+        end
+    end
+
+    @testset "inv -- unsymmetric" begin
+        A = rand(elty,n,n)
+        dA = CuArray(A)
+        dA⁻¹ = inv(dA)
+        dI = dA * dA⁻¹
+        @test Array(dI) ≈ I
+    end
+
+    @testset "inv -- symmetric" begin
+        A = rand(elty,n,n)
+        A = A + transpose(A)
+        dA = Symmetric(CuArray(A))
+        dA⁻¹ = inv(dA)
+        dI = dA.data * dA⁻¹
+        @test Array(dI) ≈ I
+    end
+
+    @testset "inv -- triangular" begin
+        for (triangle, uplo, diag) in ((LowerTriangular, 'L', 'N'), (UnitLowerTriangular, 'L', 'U'),
+                                       (UpperTriangular, 'U', 'N'), (UnitUpperTriangular, 'U', 'U'))
+            A = rand(elty,n,n)
+            A = uplo == 'L' ? tril(A) : triu(A)
+            A = diag == 'N' ? A : A - Diagonal(A) + I
+            dA = triangle(CuArray(A))
+            dA⁻¹ = inv(dA)
+            dI = dA.data * dA⁻¹
+            @test Array(dI) ≈ I
+        end
+    end
+
     @testset "Cholesky (po)" begin
         A    = rand(elty,n,n)
         A    = A*A'+I #posdef
@@ -56,7 +117,7 @@ l_range = (1:l) .+ (l_sub_start -1)
         @test_throws LinearAlgebra.PosDefException cholesky(d_A)
     end
 
-    CUDA.CUSOLVER.version() >= v"10.1" && @testset "Cholesky inverse (potri)" begin
+    @testset "Cholesky inverse (potri)" begin
         # test lower
         A    = rand(elty,n,n)
         A    = A*A'+I #posdef
@@ -965,7 +1026,25 @@ end
 ], elty2 in [
     Float16, Float32, Float64, ComplexF16, ComplexF32, ComplexF64, Int32, Int64, Complex{Int32}, Complex{Int64}
 ]
-    @testset "Square linear systems" begin
+    @testset "Symmetric linear systems" begin
+        A = rand(elty1,n,n)
+        A = A + transpose(A)
+        B = rand(elty2,n,5)
+        b = rand(elty2,n)
+        d_A = CuArray(A)
+        d_B = CuArray(B)
+        d_b = CuArray(b)
+        cublasfloat = promote_type(Float32, promote_type(elty1, elty2))
+        Af = Symmetric(cublasfloat.(A))
+        Bf = cublasfloat.(B)
+        bf = cublasfloat.(b)
+        @test Array(d_A \ d_B) ≈ (Af \ Bf)
+        @test Array(d_A \ d_b) ≈ (Af \ bf)
+        @inferred d_A \ d_B
+        @inferred d_A \ d_b
+    end
+
+    @testset "Square and unsymmetric linear systems" begin
         A = rand(elty1,n,n)
         B = rand(elty2,n,5)
         b = rand(elty2,n)
