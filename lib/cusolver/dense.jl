@@ -263,7 +263,7 @@ for (bname, fname, elty) in ((:cusolverDnSormqr_bufferSize, :cusolverDnSormqr, :
         function ormqr!(side::Char,
                         trans::Char,
                         A::StridedCuMatrix{$elty},
-                        tau::CuVector{$elty},
+                        tau::StridedCuVector{$elty},
                         C::StridedCuVecOrMat{$elty})
 
             # Support transa = 'C' for real matrices
